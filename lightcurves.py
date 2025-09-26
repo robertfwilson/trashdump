@@ -89,11 +89,38 @@ class LightCurve(object):
         self.mask &= good_guys
         
 
-    def flatten(self, wotan_kw):
+    def flatten_w(self, wotan_kw):
 
         self.flux, self.trend = detrend_lc(self.time, self.flux,  mask=self.mask, **wotan_kw)
         self.flux_err = self.flux_err/self.trend
         
+    def flatten_j(self, det_kw):
+
+        self.flux,self.trend = detrend_lc_savgol(self.time, self.flux, self.sector_dates, **det_kw)
+        self.flux_err = self.flux_err/self.trend
+
+    def flatten(self, kw):
+        if np.isin('meth',list(kw.keys())):
+            meth = kw.get('meth')
+        else:
+            meth ='wotan'
+
+
+        # make a copy without "meth"
+        kw = {k: v for k, v in kw.items() if k != "meth"}
+
+        
+        if meth == 'wotan':
+            self.flatten_w(kw)
+        
+        elif meth == 'julie':
+            self.flatten_j(kw)
+
+        else:
+            print('Theres only two options dummy!')
+
+
+
         
     def _mask_outliers(self, window=2., nsigma=5., n_mad_window=100_000):
 
@@ -900,6 +927,7 @@ def detrend_lc(time, flux, mask=None, **wotan_kw):
         
     
     return detrended_flux, trend
+
 
 
 

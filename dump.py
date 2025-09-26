@@ -10,6 +10,8 @@ from scipy.interpolate import griddata
 from astroquery.mast import Catalogs
 from fast_histogram import histogram1d
 
+from astroquery.simbad import Simbad
+
 import warnings
 
 from .ffa import *

@@ -459,4 +459,93 @@ def get_transit_depth_ppm(rp, rs):
 def get_p_tdur_t0(tce):
     return tce[1], tce[4], tce[3]
 
+#detrending with savgol from wotan but Juliefied
+def detrend_lc_savgol(time, flux, sector_dates, tce, tce_index, n_window=10, sigma_clip=3, num_iter=15):
 
+    #copy arrays so original isn’t touched
+    flux = flux.copy()
+    unmasked_flux = flux.copy()
+
+    #setup window in cadences
+    window_length = n_window * tce['tdur'][tce_index]  # in days
+    dt = 1800 / 86400.0   # cadence in days
+    window_cadences = int(round(window_length / dt))
+
+    #mask transits from all planets
+    for _, row in tce.iterrows():
+        t0, period, duration = row['t0'], row['period'], row['tdur']
+        n = np.round((time - t0) / period).astype(int)
+        nearest_transit = t0 + n * period
+        in_transit = np.abs(time - nearest_transit) < duration * (3/4)
+        flux[in_transit] = np.nan
+
+    #prepare output arrays
+    trend = np.full_like(time, np.nan, dtype=float)
+
+    #define sector boundaries
+    sector_dates = sorted(sector_dates)
+    sector_edges = list(zip(sector_dates, sector_dates[1:] + [np.nanmax(time)]))
+
+    #loop through sectors
+    for (start, end) in sector_edges:
+        sector_mask = (time >= start) & (time < end)
+        time_sec = time[sector_mask]
+        flux_sec = np.asarray(flux[sector_mask], dtype=np.float64)
+
+        #False is when in transit, and True is when out of transit
+        transit_mask = ~np.isnan(flux_sec)
+
+        # initialize clipping mask (start with all good)
+        clip_mask = transit_mask.copy()
+
+        #iterative sigma clipping with running median
+        for _ in range(num_iter):
+            flux_series = pd.Series(np.where(clip_mask, flux_sec, np.nan))
+            running_med = flux_series.rolling(window_cadences, center=True, min_periods=1).median().to_numpy()
+
+            residuals = flux_sec - running_med
+            residuals_masked = residuals[clip_mask]
+            std = 1.4826 * np.median(np.abs(residuals_masked - np.nanmedian(residuals_masked)))
+            new_mask = np.abs(residuals) < sigma_clip * std
+
+            if np.all(new_mask == clip_mask):
+                break
+            clip_mask = clip_mask & new_mask
+
+        #remove bad data points
+        clipped_flux = flux_sec[clip_mask]
+        clipped_time = time_sec[clip_mask]
+
+        #pad the gaps with numbers
+        padded_time, padded_flux, pad_mask = pad_time_series(clipped_time,clipped_flux,dt,in_mode='line')
+       
+        #detrending the padded flux using wotans savgol
+        flat_sec, trend_sec = flatten(
+            padded_time, padded_flux,
+            window_length=window_cadences,
+            method='savgol',
+            edge_cutoff=1.0,
+            break_tolerance=0.5,
+            cval=3,
+            return_trend=True
+        )
+
+        #removing padded values
+        trend_copy = trend_sec[pad_mask]
+        
+        #initialize a full-length trend array with NaNs
+        full_trend_sec = np.full_like(flux_sec, np.nan, dtype=float)
+
+        #fill the trend where transit_mask is True 
+        full_trend_sec[clip_mask] = trend_copy 
+
+        #interpolates over the "in transit" points so there aren't NaNs there
+        full_trend_sec[~transit_mask] = np.interp(time_sec[~transit_mask],time_sec[clip_mask],trend_copy)
+
+        #store into global trend array
+        trend[sector_mask] = full_trend_sec
+
+    #detrend full light curve
+    flux_detrended = unmasked_flux / trend
+
+    return flux_detrended, trend
