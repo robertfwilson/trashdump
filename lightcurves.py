@@ -7,6 +7,7 @@ import numpy as np
 import wotan
 import warnings
 from astropy.io import fits
+import batman 
 
 
 
@@ -790,11 +791,43 @@ class KepData( object ):
     def make_TransitInjection_LightCurve(self, rp_range=(0.5, 20.), per_range=(1.,500.), **wotan_kw):
 
         '''
-        TODO: MAKE THIS FUNCTION
+        TODO: MAKE THIS FUNCTION -- Juju is working on it : )
         '''
 
+        #drawing random parameters
+        rp = np.random.uniform(*rp_range)
+        per = np.random.uniform(*per_range)
+        t0 = np.random.uniform(self.time.min(),self.time.max())
         
-        return 1.
+        #compute Rp/Rs
+        #rp_stell = (rp * .0091577) / stellar parameters is for dump object not lc
+
+        #compute a/Rs
+
+        #generate model
+        params = batman.TransitParams()       #object to store transit parameters
+        params.t0 = self.time[0]              #time of inferior conjunction
+        params.per = per                      #orbital period
+        params.rp = rp                        #planet radius (in units of stellar radii)
+        params.a = 15.                        #semi-major axis (in units of stellar radii)
+        params.inc = 90.                      #orbital inclination (in degrees)
+        params.ecc = 0.                       #eccentricity
+        params.w = 90.                        #longitude of periastron (in degrees)
+        params.limb_dark = 'non-linear'       #limb darkening model
+        params.u = self.limb_coeff
+
+        #m = batman.TransitModel(params, self.time, supersample_factor=5, exp_time=self.exptime, max_err=0.1)
+        #model_flux = m.lightcurve(params)
+
+        #inject
+        #injected_flux = self.flux * model_flux
+
+        #do we detrend? Robby had put wotan_kw
+
+        #are we storing the injected parameters? i'm assuming yes?
+
+        
+        return 1. #injected_flux, model_flux, inj_params  --> this stuff will be sent into a recovery 
 
     
 

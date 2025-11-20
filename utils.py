@@ -20,6 +20,8 @@ from collections import deque
 from bisect import insort, bisect_left
 from itertools import islice
 
+import matplotlib.pyplot as plt
+
 
 
 
@@ -470,6 +472,8 @@ def detrend_lc_savgol(time, flux, sector_dates, tce, tce_index, n_window=10, sig
     window_length = n_window * tce['tdur'][tce_index]  # in days
     dt = 1800 / 86400.0   # cadence in days
     window_cadences = int(round(window_length / dt))
+    if window_cadences % 2 == 0:
+        window_cadences += 1  #SavGol prefers odd window
 
     #mask transits from all planets
     for _, row in tce.iterrows():
@@ -506,7 +510,10 @@ def detrend_lc_savgol(time, flux, sector_dates, tce, tce_index, n_window=10, sig
             residuals = flux_sec - running_med
             residuals_masked = residuals[clip_mask]
             std = 1.4826 * np.median(np.abs(residuals_masked - np.nanmedian(residuals_masked)))
-            new_mask = np.abs(residuals) < sigma_clip * std
+            if _ == 0:
+                ref_std = std
+            std_eff = max(std, 0.5 * ref_std)
+            new_mask = np.abs(residuals) < sigma_clip * std_eff
 
             if np.all(new_mask == clip_mask):
                 break
@@ -525,7 +532,7 @@ def detrend_lc_savgol(time, flux, sector_dates, tce, tce_index, n_window=10, sig
             window_length=window_cadences,
             method='savgol',
             edge_cutoff=1.0,
-            break_tolerance=0.5,
+            break_tolerance=0.25,
             cval=3,
             return_trend=True
         )

@@ -13,6 +13,10 @@ Requires-Dist: numpy
 Requires-Dist: scipy
 Requires-Dist: matplotlib
 Requires-Dist: pywavelets
+Requires-Dist: fast_histogram
+Requires-Dist: astroquery
+Requires-Dist: batman-package
+Requires-Dist: lmfit
 Dynamic: author
 Dynamic: home-page
 Dynamic: requires-python

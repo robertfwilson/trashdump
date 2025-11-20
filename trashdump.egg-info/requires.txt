@@ -2,3 +2,7 @@ numpy
 scipy
 matplotlib
 pywavelets
+fast_histogram
+astroquery
+batman-package
+lmfit
