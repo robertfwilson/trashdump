@@ -81,6 +81,15 @@ class RecycleBin(object):
             i+=1
         return other_tce_mask
 
+    def _get_all_tce_masks(self):
+        
+        all_tce_mask = np.ones_like(self.time,dtype=bool)
+        for i in range(len(self.tces)):
+            P,width,t0 = get_p_tdur_t0(self.tces[i])
+            all_tce_mask &= make_transit_mask(self.time, P, t0, width)
+        return all_tce_mask
+
+
 
 
     def _get_batman(self, limb_law='nonlinear'):
@@ -199,7 +208,7 @@ class RecycleBin(object):
 
         
     def _calc_mes(self, tce_num, mask_tce=False, calc_ses=False, use_mask=None,
-                  width=None):
+                  width=None, keep_mask=False):
 
         if width is None:
             P,width,t0 = get_p_tdur_t0(self.tces[tce_num])
@@ -224,10 +233,11 @@ class RecycleBin(object):
         
         mestime, mes = calc_mes(foldtime[mask],num,den,P,texp=self.dump.lc.exptime,n_trans=1., return_nans=True)
 
-
-
-        return mestime-P/4., (mestime/P), mes
-
+        if keep_mask == False:
+            return mestime-P/4., (mestime/P), mes
+        
+        elif keep_mask == True: 
+            return mestime-P/4., (mestime/P), mes, mask
 
 
     
@@ -385,10 +395,10 @@ class RecycleBin(object):
         P,width,t0 = get_p_tdur_t0(self.refined_tces[tce_num])
 
         try:
-            mestime, mesphase, mes = self._calc_mes(tce_num, use_mask=use_mask, calc_ses=True)
+            mestime, mesphase, mes, mask = self._calc_mes(tce_num, use_mask=use_mask, calc_ses=True, keep_mask=True)
         except RuntimeError:
             self.dump.Calculate_SES()
-            mestime, mesphase, mes = self._calc_mes(tce_num, use_mask=use_mask)
+            mestime, mesphase, mes, mask = self._calc_mes(tce_num, use_mask=use_mask, keep_mask=True)
             
 
         phase = mestime/P - 0.5
@@ -399,17 +409,24 @@ class RecycleBin(object):
         mes_over_mad = max_mes/mad_mes
 
         mes_secondary = np.max(mes[~np.logical_and(mestime>P/4.-width,mestime>P/4.-width)])
-        
+
         ses = self.dump.ses[0]
-        print(ses.shape)
-        print(self.dump.lc.time.shape)
-        print(np.sum(use_mask))
-        print(np.sum(self.dump.lc.mask))
+        ses_time = self.dump.lc.time[mask]
+  
+        transit_phase = ((ses_time - t0 + 0.5*P) % P) - 0.5*P
+        in_transit = np.abs(transit_phase) < 0.5*width
 
-        ses_mask = make_transit_mask(self.dump.lc.time[self.dump.lc.mask], P, t0, width*2)
-        ses = ses[ses_mask]
+        ses_in_transit = ses[in_transit]
+        time_in_transit = ses_time[in_transit]
 
-        max_single_event = np.nanmax(np.abs(ses))
+        transit_number = np.round((time_in_transit - t0) / P).astype(int) #essentially how many periods away from t0 this transit is
+        snr_per_transit = []
+        for n in np.unique(transit_number):
+            snr_per_transit.append(np.nanmax(np.abs(ses_in_transit[transit_number == n])))
+
+        max_single_event = np.nanmax(snr_per_transit)
+
+        
         single_event_ratio = (max_single_event / max_mes if max_mes > 0 else np.nan)
 
         out_dict = {'max_mes':max_mes, #'min_mes':min_mes,
@@ -1425,10 +1442,187 @@ def tce_masked_num_den_sectors(time, flux, t0, P, width, cadence, fill_mode='ref
             
     return N_i, D_i
 
+
     
+#NEEDS TO BE FIXED
+def bootstrap_mes_fast(tce_num, recbin, fill_mode='reflect', nwindow=7., n_boot=10000):
+    P,width,t0 = get_p_tdur_t0(recbin.tces[tce_num])
+    t = recbin.time
+    flux = recbin.flux
+    cadence = recbin.exptime
+    sector_dates = recbin.dump.lc.sector_dates
+
+    foldtime = (t - t0 + P/2.) % P - P/2.
+    tce_phase_index = np.argmin(np.abs(foldtime))
     
+    #getting the cadence-level Num and Den for this TCE
+    try:
+        #N_i and D_i shape = (# of fold channels, # of cadences)
+        N_i, D_i = tce_masked_num_den_sectors(t, flux, t0, P, width, cadence, fill_mode, nwindow, sector_dates=sector_dates)
+    except IndexError:
+        return np.nan, np.nan
+
+    #mask out all TCEs so we only have noise
+    all_tce_mask = recbin._get_all_tce_masks() #true = no TCE
+    N_i[:, ~all_tce_mask] = 0.0 #set N_i to 0 when there's a TCE
+    D_i[:, ~all_tce_mask] = 0.0 #set D_i to 0 when there's a TCE
+
+    #create array to store MES values
+    mes_vals = np.zeros(n_boot)
+
+    #fast bootstrap -- vectorized
+    for b in range(n_boot):
+        #permute cadences
+        idx = np.random.randint(0, N_i.shape[1], N_i.shape[1])
+        new_N = N_i[:,idx]
+        new_D = D_i[:,idx]
+
+        #collapsing 
+        N_fold = np.sum(new_N,axis=1)
+        D_fold = np.sum(new_D,axis=1)
+
+        #compute MES -- length of MES array will be period / cadence
+        mes_phase = N_fold / np.sqrt(D_fold)
+        mes_phase[D_fold <= 0] = np.nan 
+        mes_vals[b] = np.nanmax(mes_phase)
+        
+    #calculate the actual max mes of the data
+    _, _, mes = recbin._calc_mes(tce_num, use_mask=None, calc_ses=False)
+    max_mes = np.nanmax(mes)
+
+    #calculate the false alarm probability
+    fap = np.sum(mes_vals >= max_mes) / n_boot
+
+    return mes_vals, fap
 
 
+
+def bootstrap_mes_slow(tce_num, recbin, fill_mode='reflect', nwindow=7., n_boot=10000):
+    P,width,t0 = get_p_tdur_t0(recbin.tces[tce_num])
+    t = recbin.time
+    flux = recbin.flux
+    cadence = recbin.exptime
+    sector_dates = recbin.dump.lc.sector_dates
+
+    #getting the cadence-level Num and Den for this TCE
+    try:
+        #N_i and D_i shape = (# of fold channels, # of cadences)
+        N_i, D_i = tce_masked_num_den_sectors(t, flux, t0, P, width, cadence, fill_mode, nwindow, sector_dates=sector_dates)
+    except IndexError:
+        return np.nan, np.nan
+
+    #mask out all TCEs so we only have noise
+    all_tce_mask = recbin._get_all_tce_masks() #true = no TCE
+    N_i[:, ~all_tce_mask] = 0.0 #set N_i to 0 when there's a TCE
+    D_i[:, ~all_tce_mask] = 0.0 #set D_i to 0 when there's a TCE
+
+    #create array to store MES values
+    mes_vals = np.zeros(n_boot)
+
+    #slow bootstrap -- loop over each cadence explicitly
+    for b in range(n_boot):
+
+        perm = np.random.permutation(N_i.shape[1])
+        new_N = np.zeros_like(N_i)
+        new_D = np.zeros_like(D_i)
+
+        #permute each row manually
+        for i in range(N_i.shape[0]):
+            for j in range(N_i.shape[1]):
+                new_N[i,:] = N_i[i,perm[j]]
+                new_D[i,:] = D_i[i,perm[j]]
+
+        N_fold = np.zeros(N_i.shape[0])
+        D_fold = np.zeros(N_i.shape[0])
+
+        #collapsing
+        for i in range(N_i.shape[0]):
+            for j in range(N_i.shape[1]):
+                N_fold[i] += new_N[i,j]
+                D_fold[i] += new_D[i,j]
+
+        mes_phase = np.full(N_i.shape[0],np.nan)
+
+        for i in range(N_i.shape[0]):
+            if D_fold[i] > 0:
+                mes_phase[i] = N_fold[i] / np.sqrt(D_fold[i])
+
+        mes_vals[b] = np.nanmax(mes_phase)
+
+    #calculate the actual max mes of the data
+    _, _, mes = recbin._calc_mes(tce_num, use_mask=None, calc_ses=False)
+    max_mes = np.nanmax(mes)
+
+    #calculate the false alarm probability
+    fap = np.sum(mes_vals >= max_mes) / n_boot
+
+    return mes_vals, fap
+
+
+#NEEDS TO BE FIXED
+def bootstrap_mes_hist(tce_num, recbin, fill_mode='reflect', nwindow=7., bins=2000, n_boot=10000):
+    P, width, t0 = get_p_tdur_t0(recbin.tces[tce_num])
+    t = recbin.time
+    flux = recbin.flux
+    cadence = recbin.exptime
+    sector_dates = recbin.dump.lc.sector_dates
+    foldtime = (t-t0 + P/2.)%P - P/2.
+    t0_mask = np.abs(foldtime)<=cadence
+    n_transits = np.sum(t0_mask)
+
+    #getting the cadence-level Num and Den for this TCE
+    try:
+        N_i, D_i = tce_masked_num_den_sectors(
+            t, flux, t0, P, width, cadence,
+            fill_mode, nwindow,
+            sector_dates=sector_dates
+        )
+    except IndexError:
+        return np.nan, np.nan
+
+    #mask out all TCEs so we only have noise
+    all_tce_mask = recbin._get_all_tce_masks()
+    N_i[:, ~all_tce_mask] = 0.0
+    D_i[:, ~all_tce_mask] = 0.0
+
+    #calculating the cadence-level ses from Num and Den
+    ses = N_i / np.sqrt(D_i)
+    ses[D_i <= 0] = np.nan
+
+    #build histograms per phase channel
+    histograms = []
+    bin_centers = []
+    for i in range(n_phase):
+        ses_row = SES[i, :]
+        ses_row = ses_row[np.isfinite(ses_row)]
+        h, edges = np.histogram(ses_row, bins=bins, density=True)
+        histograms.append(h)
+        bin_centers.append(0.5 * (edges[:-1] + edges[1:]))
+
+    histograms = np.array(histograms)
+    bin_centers = np.array(bin_centers)
+
+    #normalize to probability
+    histograms = histograms / histograms.sum(axis=1, keepdims=True)
+
+    #create array to store MES values
+    mes_vals = np.zeros(n_boot)
+
+    #bootstrap
+    for b in range(n_boot):
+        #draw as many SES values as the number of transits from the empirical SES distribution
+        ses_draws = np.random.choice(centers, size=n_transits, p=probs)
+        #calculate the mes
+        mes_vals[b] = np.sum(ses_draws) / np.sqrt(n_transits)
+
+    #calculate the actual max mes of the data
+    _, _, mes = recbin._calc_mes(tce_num, use_mask=None, calc_ses=False)
+    max_mes = np.nanmax(mes)
+
+    #calculate the false alarm probability
+    fap = np.sum(mes_vals >= max_mes) / n_boot
+
+    return mes_vals, fap
 
 
 def temporal_chi2_statistic(t, flux, t0, P, width , cadence, fill_mode='reflect', nwindow=7., sector_dates=None):    
@@ -1985,7 +2179,8 @@ def make_data_validation_report(tce_num, recbin, color1='C0', color2='C3', savef
                'global_diff_red_chi2': 0., 'global_lin_diff_chi2':0., 'global_lin_diff_red_chi2': 0.,
                'num_good_transits':recbin.dump.min_transits, 'ramp_median_bic_stat':0, 
                'spsd_median_bic_stat':0, 'sine_median_bic_stat':0, 'sine_bic_stat':0, 'ramp_bic_stat':0,
-               'spsd_bic_stat':0, 'spsd_min_bic_stat':0, 'sine_min_bic_stat':0, 'ramp_min_bic_stat':0,'asym_stat':10,'dmm_ratio':1.5}
+               'spsd_bic_stat':0, 'spsd_min_bic_stat':0, 'sine_min_bic_stat':0, 'ramp_min_bic_stat':0,'asym_stat':10,'dmm_ratio':1.5,
+               'single_event_rat':.88}
 
     for i,k in enumerate(keys):
 
